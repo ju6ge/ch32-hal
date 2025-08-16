@@ -7,6 +7,7 @@ use core::task::Poll;
 use embassy_futures::select::{select, Either};
 use embassy_sync::waitqueue::AtomicWaker;
 use embedded_hal::i2c::Operation;
+use mode::{OperatingMode, Master, Slave};
 
 use crate::dma::ChannelAndRequest;
 use crate::gpio::{AFType, Speed};
@@ -15,6 +16,27 @@ use crate::mode::{Async, Blocking, Mode};
 // use crate::interrupt::Interrupt;
 use crate::time::Hertz;
 use crate::{interrupt, peripherals, Peri, Timeout};
+
+/// I2C modes
+pub mod mode {
+    trait SealedMode {}
+
+    /// Trait for I2C master operations.
+    #[allow(private_bounds)]
+    pub trait OperatingMode: SealedMode {}
+
+
+    /// Mode allowing for I2C master operations.
+    pub struct Master;
+    /// Mode allowing for I2C slave operations.
+    pub struct Slave;
+
+    impl SealedMode for Master {}
+    impl OperatingMode for Master {}
+
+    impl SealedMode for Slave {}
+    impl OperatingMode for Slave {}
+}
 
 /// Event interrupt handler.
 pub struct EventInterruptHandler<T: Instance> {
@@ -88,6 +110,20 @@ pub struct Config {
     pub duty: Duty,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum SlaveAddress {
+    SevenBit(u8),
+    TenBit(u16)
+}
+
+/// I2C config for slave mode operation
+#[non_exhaustive]
+#[derive(Copy, Clone)]
+pub struct SlaveConfig {
+    pub address: SlaveAddress,
+    pub general_call: bool,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -99,15 +135,15 @@ impl Default for Config {
 }
 
 /// I2C driver.
-pub struct I2c<'d, T: Instance, M: Mode> {
+pub struct I2c<'d, T: Instance, M: Mode, O: OperatingMode> {
     tx_dma: Option<ChannelAndRequest<'d>>,
     rx_dma: Option<ChannelAndRequest<'d>>,
     #[cfg(feature = "embassy")]
     timeout: embassy_time::Duration,
-    _phantom: PhantomData<(&'d mut T, M)>,
+    _phantom: PhantomData<(&'d mut T, M, O)>,
 }
 
-impl<'d, T: Instance> I2c<'d, T, Async> {
+impl<'d, T: Instance> I2c<'d, T, Async, Master> {
     /// Create a new I2C driver.
     pub fn new<const REMAP: u8>(
         peri: Peri<'d, T>,
@@ -125,7 +161,7 @@ impl<'d, T: Instance> I2c<'d, T, Async> {
     }
 }
 
-impl<'d, T: Instance> I2c<'d, T, Blocking> {
+impl<'d, T: Instance> I2c<'d, T, Blocking, Master> {
     /// Create a new blocking I2C driver.
     pub fn new_blocking<const REMAP: u8>(
         peri: Peri<'d, T>,
@@ -138,7 +174,7 @@ impl<'d, T: Instance> I2c<'d, T, Blocking> {
     }
 }
 
-impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
+impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Master> {
     /// Create a new I2C driver.
     fn new_inner<const REMAP: u8>(
         _peri: Peri<'d, T>,
@@ -169,22 +205,13 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
             _phantom: PhantomData,
         };
 
-        this.init(freq, config);
+        this.init_master(freq, config);
 
         this
     }
 
-    fn timeout(&self) -> Timeout {
-        Timeout {
-            #[cfg(feature = "embassy")]
-            deadline: embassy_time::Instant::now() + self.timeout,
-        }
-    }
-}
-
-impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
     // init as master mode
-    fn init(&mut self, freq: Hertz, config: Config) {
+    fn init_master(&mut self, freq: Hertz, config: Config) {
         let regs = T::regs();
 
         regs.ctlr1().modify(|w| w.set_pe(false)); // disale i2c
@@ -231,6 +258,15 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
 
         regs.ctlr1().modify(|w| w.set_pe(true));
     }
+}
+
+impl<'d, T: Instance, M: Mode, O: OperatingMode> I2c<'d, T, M, O> {
+    fn timeout(&self) -> Timeout {
+        Timeout {
+            #[cfg(feature = "embassy")]
+            deadline: embassy_time::Instant::now() + self.timeout,
+        }
+    }
 
     fn check_and_clear_error_flags() -> Result<crate::pac::i2c::regs::Star1, Error> {
         // Note that flags should only be cleared once they have been registered. If flags are
@@ -271,7 +307,9 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
 
         Ok(star1)
     }
+}
 
+impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Master> {
     fn write_bytes(&mut self, addr: u8, bytes: &[u8], timeout: Timeout, frame: FrameOptions) -> Result<(), Error> {
         if frame.send_start() {
             // Send a START condition
@@ -480,7 +518,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
 
 // ======== Async
 
-impl<'d, T: Instance> I2c<'d, T, Async> {
+impl<'d, T: Instance> I2c<'d, T, Async, Master> {
     async fn write_frame(&mut self, address: u8, write: &[u8], frame: FrameOptions) -> Result<(), Error> {
         T::regs().ctlr2().modify(|w| {
             // Note: Do not enable the ITBUFEN bit in the I2C_CR2 register if DMA is used for
@@ -832,7 +870,7 @@ impl<'d, T: Instance> I2c<'d, T, Async> {
 
 // ======== Common
 
-impl<'d, T: Instance, M: Mode> Drop for I2c<'d, T, M> {
+impl<'d, T: Instance, M: Mode, O: OperatingMode> Drop for I2c<'d, T, M, O> {
     fn drop(&mut self) {
         T::regs().ctlr1().modify(|w| w.set_pe(false));
     }
@@ -905,11 +943,11 @@ impl embedded_hal::i2c::Error for Error {
     }
 }
 
-impl<'d, T: Instance, M: Mode> embedded_hal::i2c::ErrorType for I2c<'d, T, M> {
+impl<'d, T: Instance, M: Mode> embedded_hal::i2c::ErrorType for I2c<'d, T, M, Master> {
     type Error = Error;
 }
 
-impl<'d, T: Instance, M: Mode> embedded_hal::i2c::I2c for I2c<'d, T, M> {
+impl<'d, T: Instance, M: Mode> embedded_hal::i2c::I2c for I2c<'d, T, M, Master> {
     fn read(&mut self, address: u8, read: &mut [u8]) -> Result<(), Self::Error> {
         self.blocking_read(address, read)
     }
@@ -922,6 +960,7 @@ impl<'d, T: Instance, M: Mode> embedded_hal::i2c::I2c for I2c<'d, T, M> {
         self.blocking_write_read(address, write, read)
     }
 
+    /// not implemented!
     fn transaction(
         &mut self,
         address: u8,
@@ -933,7 +972,7 @@ impl<'d, T: Instance, M: Mode> embedded_hal::i2c::I2c for I2c<'d, T, M> {
     }
 }
 
-impl<'d, T: Instance> embedded_hal_async::i2c::I2c for I2c<'d, T, Async> {
+impl<'d, T: Instance> embedded_hal_async::i2c::I2c for I2c<'d, T, Async, Master> {
     async fn read(&mut self, address: u8, read: &mut [u8]) -> Result<(), Self::Error> {
         self.read(address, read).await
     }
@@ -946,6 +985,8 @@ impl<'d, T: Instance> embedded_hal_async::i2c::I2c for I2c<'d, T, Async> {
         self.write_read(address, write, read).await
     }
 
+
+    /// not yet implemented!
     async fn transaction(
         &mut self,
         address: u8,
@@ -959,7 +1000,7 @@ impl<'d, T: Instance> embedded_hal_async::i2c::I2c for I2c<'d, T, Async> {
 
 // eh02 compatible
 
-impl<'d, T: Instance, M: Mode> embedded_hal_02::blocking::i2c::Read for I2c<'d, T, M> {
+impl<'d, T: Instance, M: Mode> embedded_hal_02::blocking::i2c::Read for I2c<'d, T, M, Master> {
     type Error = Error;
 
     fn read(&mut self, address: u8, buffer: &mut [u8]) -> Result<(), Self::Error> {
@@ -967,7 +1008,7 @@ impl<'d, T: Instance, M: Mode> embedded_hal_02::blocking::i2c::Read for I2c<'d, 
     }
 }
 
-impl<'d, T: Instance, M: Mode> embedded_hal_02::blocking::i2c::Write for I2c<'d, T, M> {
+impl<'d, T: Instance, M: Mode> embedded_hal_02::blocking::i2c::Write for I2c<'d, T, M, Master> {
     type Error = Error;
 
     fn write(&mut self, address: u8, write: &[u8]) -> Result<(), Self::Error> {
@@ -975,7 +1016,7 @@ impl<'d, T: Instance, M: Mode> embedded_hal_02::blocking::i2c::Write for I2c<'d,
     }
 }
 
-impl<'d, T: Instance, M: Mode> embedded_hal_02::blocking::i2c::WriteRead for I2c<'d, T, M> {
+impl<'d, T: Instance, M: Mode> embedded_hal_02::blocking::i2c::WriteRead for I2c<'d, T, M, Master> {
     type Error = Error;
 
     fn write_read(&mut self, address: u8, write: &[u8], read: &mut [u8]) -> Result<(), Self::Error> {
