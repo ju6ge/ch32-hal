@@ -117,6 +117,12 @@ pub enum SlaveAddress {
 }
 
 /// I2C config for slave mode operation
+///
+/// Configure the address the I2C device will consider its address. 10- and 7-Bit addresses are supported.
+/// It is also possible to configure responsding to detecting a general call.
+///
+/// Note: ch32 devices can support responding to two different addresses on the same interface. As of
+/// now this is not implemented and only using one addresse is supported.
 #[non_exhaustive]
 #[derive(Copy, Clone)]
 pub struct SlaveConfig {
