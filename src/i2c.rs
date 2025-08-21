@@ -6,6 +6,7 @@ use core::task::Poll;
 
 use embassy_futures::select::{select, Either};
 use embassy_sync::waitqueue::AtomicWaker;
+use embassy_time::Duration;
 use embedded_hal::i2c::Operation;
 use mode::{Master, OperatingMode, Slave};
 
@@ -121,7 +122,6 @@ pub enum SlaveAddress {
 /// It is also possible to configure responsding to detecting a general call.
 ///
 /// Note: ch32 devices support dual addressing mode. This mode of operation has not been implemented!
-#[non_exhaustive]
 #[derive(Copy, Clone)]
 pub struct SlaveConfig {
     pub address: SlaveAddress,
@@ -134,7 +134,7 @@ pub enum SlaveCommand {
     /// received read command, will enter transmitter mode to respond with data
     ReadCommand,
     /// received write command, should read incoming data
-    WriteCommand
+    WriteCommand,
 }
 
 impl Default for Config {
@@ -280,14 +280,12 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Master> {
                 w.set_addmode(false);
                 w.set_add7_1(addr);
             }),
-            SlaveAddress::TenBit(addr) => {
-                T::regs().oaddr1().modify(|w| {
-                    w.set_addmode(true);
-                    w.set_add9_8((addr >> 8) as u8);
-                    w.set_add7_1((addr >> 1) as u8);
-                    w.set_add0(addr & 0x0001 == 0x0001);
-                })
-            }
+            SlaveAddress::TenBit(addr) => T::regs().oaddr1().modify(|w| {
+                w.set_addmode(true);
+                w.set_add9_8((addr >> 8) as u8);
+                w.set_add7_1((addr >> 1) as u8);
+                w.set_add0(addr & 0x0001 == 0x0001);
+            }),
         }
         I2c::<'d, T, M, Slave> {
             tx_dma: self.tx_dma.take(),
@@ -300,6 +298,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Master> {
 
 impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Slave> {
     pub fn listen_blocking(&mut self) -> Result<SlaveCommand, Error> {
+        let timout = self.timeout();
         // clear status to remove and dirty state before starting listen if ack has not been enabled yet
         if !T::regs().ctlr1().read().ack() {
             let _ = Self::check_and_clear_error_flags();
@@ -321,6 +320,79 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Slave> {
                 Ok(SlaveCommand::WriteCommand)
             }
         }
+    }
+
+    /// call this after receiving [`SlaveCommand::WriteCommand`] to receive data from master
+    pub fn blocking_read_timeout(&mut self, recv_buf: &mut [u8]) -> Result<usize, (usize, Error)> {
+        //clear addr status to start receiving bytes
+        T::regs().star1().modify(|w| w.set_addr(false));
+
+        let mut received_bytes = 0;
+        while received_bytes <= recv_buf.len() {
+            let star1 = T::regs().star1().read();
+            // received data \o/
+            if star1.rx_ne() && received_bytes < recv_buf.len() {
+                recv_buf[received_bytes] = T::regs().datar().read().datar();
+                received_bytes += 1;
+            } else {
+                //received more data than fits in buffer
+                return Err((received_bytes, Error::Overrun))
+            }
+            // send nack if next byte would overrun buffer
+            if received_bytes == recv_buf.len() {
+                T::regs().ctlr1().modify(|w| w.set_ack(false));
+            }
+
+            // check for any error states
+            Self::check_and_clear_error_flags().map_err(|err| (received_bytes, err))?;
+
+            // master sent stop condition no more data can be received
+            if star1.stopf() {
+                T::regs().ctlr1().modify(|w| w.set_swrst(true));
+                return Ok(received_bytes);
+            }
+
+        }
+        Ok(0)
+    }
+
+    fn check_transmission_end(&mut self) -> bool {
+        let star1 = T::regs().star1().read();
+        if star1.af() || star1.stopf() {
+            if star1.stopf() {
+                T::regs().ctlr1().modify(|w| w.set_swrst(true));
+            }
+            if star1.af() {
+                T::regs().star1().modify(|w| w.set_af(false));
+            }
+            return true
+        }
+        false
+    }
+
+    /// call this after receiving [`SlaveCommand::ReadCommand`] to send data to master
+    pub fn blocking_write_timeout(&mut self, trans_buf: &[u8]) -> Result<(), Error> {
+        // disable ack in send mode the slave does not send ack
+        T::regs().ctlr1().modify(|w| w.set_ack(false));
+
+        //clear addr status to start transmission
+        T::regs().star1().modify(|w| w.set_addr(false));
+
+        for (i, b) in trans_buf.iter().enumerate() {
+            while !T::regs().star1().read().tx_e() {
+                if self.check_transmission_end() { return Ok(()) }
+            }
+            T::regs().datar().write(|w| w.set_datar(*b));
+        }
+
+        while !self.check_transmission_end() {
+            if T::regs().star1().read().tx_e() {
+                T::regs().datar().write(|w| w.set_datar(0x0)); // write 0 if more bytes are expected by master
+            }
+        }
+
+        // all bytes sent and stop bit received
+        Ok(())
     }
 }
 
