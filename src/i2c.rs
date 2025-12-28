@@ -279,10 +279,12 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Master> {
         match slave_config.address {
             SlaveAddress::SevenBit(addr) => T::regs().oaddr1().modify(|w| {
                 w.set_addmode(false);
+                w.set_must1(true);
                 w.set_add7_1(addr);
             }),
             SlaveAddress::TenBit(addr) => T::regs().oaddr1().modify(|w| {
                 w.set_addmode(true);
+                w.set_must1(true);
                 w.set_add9_8((addr >> 8) as u8);
                 w.set_add7_1((addr >> 1) as u8);
                 w.set_add0(addr & 0x0001 == 0x0001);
