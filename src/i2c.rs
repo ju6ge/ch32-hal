@@ -274,6 +274,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Master> {
 
     /// configure device for slave mode operation using supplied i2c addresses
     pub fn into_slave(mut self, slave_config: SlaveConfig) -> I2c<'d, T, M, Slave> {
+        T::regs().ctlr1().modify(|w| w.set_pe(false));
         T::regs().ctlr1().modify(|w| w.set_engc(slave_config.general_call));
         match slave_config.address {
             SlaveAddress::SevenBit(addr) => T::regs().oaddr1().modify(|w| {
@@ -287,6 +288,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Master> {
                 w.set_add0(addr & 0x0001 == 0x0001);
             }),
         }
+        T::regs().ctlr1().modify(|w| w.set_pe(true));
         I2c::<'d, T, M, Slave> {
             tx_dma: self.tx_dma.take(),
             rx_dma: self.rx_dma.take(),
