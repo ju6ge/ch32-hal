@@ -311,10 +311,12 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Slave> {
             timout.check().ok_or(Error::Timeout)?;
         }
 
-        if T::regs().star2().read().gencall() {
+        let star2 = T::regs().star2().read();
+
+        if star2.gencall() {
             Ok(SlaveCommand::GeneralCall)
         } else {
-            if T::regs().star2().read().tra() {
+            if star2.tra() {
                 Ok(SlaveCommand::ReadCommand)
             } else {
                 Ok(SlaveCommand::WriteCommand)
@@ -336,7 +338,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Slave> {
                 received_bytes += 1;
             } else {
                 //received more data than fits in buffer
-                return Err((received_bytes, Error::Overrun))
+                return Err((received_bytes, Error::Overrun));
             }
             // send nack if next byte would overrun buffer
             if received_bytes == recv_buf.len() {
@@ -351,7 +353,6 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Slave> {
                 T::regs().ctlr1().modify(|w| w.set_swrst(true));
                 return Ok(received_bytes);
             }
-
         }
         Ok(0)
     }
@@ -365,7 +366,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Slave> {
             if star1.af() {
                 T::regs().star1().modify(|w| w.set_af(false));
             }
-            return true
+            return true;
         }
         false
     }
@@ -380,7 +381,9 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Slave> {
 
         for (i, b) in trans_buf.iter().enumerate() {
             while !T::regs().star1().read().tx_e() {
-                if self.check_transmission_end() { return Ok(()) }
+                if self.check_transmission_end() {
+                    return Ok(());
+                }
             }
             T::regs().datar().write(|w| w.set_datar(*b));
         }
