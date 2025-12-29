@@ -303,6 +303,8 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Master> {
 impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Slave> {
     pub fn listen_blocking(&mut self) -> Result<SlaveCommand, Error> {
         let timout = self.timeout();
+
+        T::regs().ctlr1().modify(|w| w.set_pe(true));
         // clear status to remove and dirty state before starting listen if ack has not been enabled yet
         if !T::regs().ctlr1().read().ack() {
             let _ = Self::check_and_clear_error_flags();
