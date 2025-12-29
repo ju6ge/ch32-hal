@@ -344,17 +344,14 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Slave> {
             if star1.rx_ne() && received_bytes < recv_buf.len() {
                 recv_buf[received_bytes] = T::regs().datar().read().datar();
                 received_bytes += 1;
-            } else {
+            } else if received_bytes == recv_buf.len() {
+                T::regs().ctlr1().modify(|w| w.set_ack(false));
                 //received more data than fits in buffer
                 return Err((received_bytes, Error::Overrun));
+            } else {
+                // check for any error states
+                Self::check_and_clear_error_flags().map_err(|err| (received_bytes, err))?;
             }
-            // send nack if next byte would overrun buffer
-            if received_bytes == recv_buf.len() {
-                T::regs().ctlr1().modify(|w| w.set_ack(false));
-            }
-
-            // check for any error states
-            Self::check_and_clear_error_flags().map_err(|err| (received_bytes, err))?;
 
             // master sent stop condition no more data can be received
             if star1.stopf() {
