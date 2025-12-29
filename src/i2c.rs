@@ -128,6 +128,7 @@ pub struct SlaveConfig {
     pub general_call: bool,
 }
 
+#[derive(Debug)]
 pub enum SlaveCommand {
     /// received general call addresse, can process incoming data
     GeneralCall,
