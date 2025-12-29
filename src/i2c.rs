@@ -292,6 +292,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Master> {
             }),
         }
         T::regs().ctlr1().modify(|w| w.set_pe(true));
+
         I2c::<'d, T, M, Slave> {
             tx_dma: self.tx_dma.take(),
             rx_dma: self.rx_dma.take(),
@@ -357,7 +358,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Slave> {
 
             // master sent stop condition no more data can be received
             if star1.stopf() {
-                T::regs().ctlr1().modify(|w| w.set_swrst(true));
+                T::regs().ctlr1().modify(|w| w.set_swrst(false));
                 return Ok(received_bytes);
             }
         }
@@ -368,7 +369,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M, Slave> {
         let star1 = T::regs().star1().read();
         if star1.af() || star1.stopf() {
             if star1.stopf() {
-                T::regs().ctlr1().modify(|w| w.set_swrst(true));
+                T::regs().ctlr1().modify(|w| w.set_swrst(false));
             }
             if star1.af() {
                 T::regs().star1().modify(|w| w.set_af(false));
